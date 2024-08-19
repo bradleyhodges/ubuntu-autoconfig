@@ -380,6 +380,12 @@ EOF
     handle @phpFiles {
         try_files {path} =404
     }
+    
+    # Add logging for access and errors
+    log {
+        output file /var/log/caddy/access.log
+        output file /var/log/caddy/error.log
+    }
 }
 EOF
 
