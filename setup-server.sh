@@ -36,7 +36,6 @@ PUBLIC_ROOT_PATH="$DOCUMENT_ROOT_PATH/public" # This is where your public files 
 UTILITIES_PATH="$DOCUMENT_ROOT_PATH/utilities" # This is where your utilities will live
 COMPOSER_PATH="$DOCUMENT_ROOT_PATH/composer" # This is where Composer will be installed
 COMPOSER_AUTOLOAD_PATH="$COMPOSER_PATH/vendor/autoload.php" # This is where Composer autoload will be generated
-GO_VERSION="latest"  # specify a specific Go version (e.g., "1.20.3") if you want, otherwise we'll get the latest version automatically
 # *********************************************************** #
 
 # ` > start droplet configuration script
@@ -109,7 +108,7 @@ set -e # Exit script on error
     sudo apt-get update || { echo "Package update/upgrade failed"; exit 1; }
     sudo apt-get install -y software-properties-common  || { echo "Package update/upgrade failed"; exit 1; }
     sudo add-apt-repository -y ppa:ondrej/php || true
-    sudo apt-get update && sudo apt-get upgrade -y || { echo "Package update/upgrade failed"; exit 1; }
+    sudo apt-get update && sudo apt-get upgrade -y && sudo apt-get dist-upgrade -y || { echo "Package update/upgrade failed"; exit 1; }
 
     # Install necessary dependencies if not already installed
     dependencies=(curl ufw unzip cron git libssl-dev zlib1g-dev pkg-config openssl)
@@ -161,6 +160,80 @@ EOF
 
     php_version=$(php -v | head -n 1)
     echo "PHP successfully installed. Version: $php_version"
+
+    # Find the PHP configuration file (php.ini)
+    # Find the PHP configuration file (php.ini)
+    PHP_INI=$(php --ini | grep "Loaded Configuration File" | awk '{print $4}')
+
+    if [ -z "$PHP_INI" ]; then
+        echo "php.ini file not found."
+    else
+        echo "PHP configuration file found at: $PHP_INI"
+
+        # Backup the existing php.ini
+        cp "$PHP_INI" "$PHP_INI.bak_$(date +%F_%T)" || true
+        echo "Backup of php.ini created at $PHP_INI.bak_$(date +%F_%T)"
+
+        # Security and performance settings for php.ini
+        echo "Applying security and performance settings..."
+
+        sed -i 's/^expose_php\s*=.*/expose_php = Off/' "$PHP_INI" || true
+        sed -i 's/^display_errors\s*=.*/display_errors = Off/' "$PHP_INI" || true
+        sed -i 's/^file_uploads\s*=.*/file_uploads = On/' "$PHP_INI" || true
+        sed -i 's/^upload_max_filesize\s*=.*/upload_max_filesize = 1M/' "$PHP_INI" || true
+        sed -i 's/^allow_url_fopen\s*=.*/allow_url_fopen = Off/' "$PHP_INI" || true
+        sed -i 's|^session.save_path\s*=.*|session.save_path = "'$DOCUMENT_ROOT_PATH'/session"|' "$PHP_INI" || true
+        sed -i 's|^upload_tmp_dir\s*=.*|upload_tmp_dir = "'$DOCUMENT_ROOT_PATH'/session"|' "$PHP_INI" || true
+        sed -i '/^disable_functions/s/=.*/=exec,passthru,shell_exec,system,proc_open,popen,curl_exec,curl_multi_exec,parse_ini_file,show_source/' "$PHP_INI" || true
+
+        # If open_basedir isn't set, add it
+        if ! grep -q '^open_basedir' "$PHP_INI"; then
+            echo 'open_basedir = "'$DOCUMENT_ROOT_PATH'/:/tmp/:/var/lib/php/sessions/"' >> "$PHP_INI" || true
+        else
+            sed -i 's|^open_basedir\s*=.*|open_basedir = "'$DOCUMENT_ROOT_PATH'/:/tmp/:/var/lib/php/sessions/"|' "$PHP_INI" || true
+        fi
+
+        # Harden session security
+        sed -i 's/^session.cookie_httponly\s*=.*/session.cookie_httponly = 1/' "$PHP_INI" || true
+        sed -i 's/^session.cookie_secure\s*=.*/session.cookie_secure = 1/' "$PHP_INI" || true
+        sed -i 's/^session.use_strict_mode\s*=.*/session.use_strict_mode = 1/' "$PHP_INI" || true
+        sed -i 's/^session.use_only_cookies\s*=.*/session.use_only_cookies = 1/' "$PHP_INI" || true
+
+        # Additional performance tuning
+        sed -i 's/^memory_limit\s*=.*/memory_limit = 256M/' "$PHP_INI" || true
+        sed -i 's/^max_execution_time\s*=.*/max_execution_time = 30/' "$PHP_INI" || true
+        sed -i 's/^max_input_time\s*=.*/max_input_time = 30/' "$PHP_INI" || true
+        sed -i 's/^post_max_size\s*=.*/post_max_size = 1M/' "$PHP_INI" || true
+
+        # Enable OPCache (for PHP performance)
+        sed -i 's/^;opcache.enable\s*=.*/opcache.enable = 1/' "$PHP_INI" || true
+        sed -i 's/^;opcache.memory_consumption\s*=.*/opcache.memory_consumption = 128/' "$PHP_INI" || true
+        sed -i 's/^;opcache.max_accelerated_files\s*=.*/opcache.max_accelerated_files = 10000/' "$PHP_INI" || true
+        sed -i 's/^;opcache.revalidate_freq\s*=.*/opcache.revalidate_freq = 60/' "$PHP_INI" || true
+        sed -i 's/^;opcache.validate_timestamps\s*=.*/opcache.validate_timestamps = 1/' "$PHP_INI" || true
+
+        # Disable dangerous PHP functions
+        sed -i 's/^disable_functions\s*=.*/disable_functions = exec,passthru,shell_exec,system,proc_open,popen,curl_exec,curl_multi_exec,parse_ini_file,show_source/' "$PHP_INI" || true
+
+        # Additional security measures
+        echo "session.cookie_samesite = Strict" >> "$PHP_INI" || true  # Prevent CSRF attacks
+        echo "cgi.fix_pathinfo = 0" >> "$PHP_INI" || true  # Prevent path disclosure vulnerabilities
+
+        # Restrict PHP's access to specific directories
+        echo "open_basedir = \"$DOCUMENT_ROOT_PATH/:/tmp/:/var/lib/php/sessions/\"" >> "$PHP_INI" || true
+
+        # Reload PHP-FPM to apply changes (if applicable)
+        php_fpm_service=$(systemctl list-units --type=service --state=running | grep -oP 'php[0-9]+\.[0-9]+-fpm\.service' | head -n 1)
+
+        if [ -n "$php_fpm_service" ]; then
+            echo "Reloading PHP-FPM service: $php_fpm_service"
+            systemctl reload "$php_fpm_service" || true
+        else
+            echo "No active PHP-FPM service found. Please manually reload your PHP service."
+        fi
+
+        echo "Security and performance settings applied successfully."
+    fi
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Install FrankenPHP (Prebuilt Binary) ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
     echo "Downloading FrankenPHP binary..."
@@ -380,7 +453,7 @@ EOF
     handle @phpFiles {
         try_files {path} =404
     }
-    
+
     # Add logging for access and errors
     log {
         output file /var/log/caddy/access.log
@@ -411,7 +484,7 @@ EOF
     # Set up ufw firewall rules
     ufw default deny incoming
     ufw default allow outgoing
-    ufw allow ssh
+    ufw allow OpenSSH
     ufw allow http  # Port 80
     ufw allow https  # Port 443
     ufw allow 7844/tcp  # Cloudflare Tunnel (HTTP2/QUIC) on TCP
