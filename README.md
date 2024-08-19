@@ -31,11 +31,6 @@ Run the script with sudo:
 sudo ./setup-server.sh
 ```
 
-Alternatively, execute the script directly from the repository:
-```bash
-sudo bash -c "$(curl -sSL https://raw.githubusercontent.com/dfes-ses/common-api-utilities/main/setup-server.sh)"
-```
-
 ## Key Components
 ### Configuration Parameters
 Ensure the following parameters are set correctly before executing the script:
