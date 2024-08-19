@@ -108,7 +108,7 @@ set -e # Exit script on error
     sudo apt-get update || { echo "Package update/upgrade failed"; exit 1; }
     sudo apt-get install -y software-properties-common  || { echo "Package update/upgrade failed"; exit 1; }
     sudo add-apt-repository -y ppa:ondrej/php || true
-    sudo apt-get update && sudo apt-get upgrade -y && sudo apt-get dist-upgrade -y || { echo "Package update/upgrade failed"; exit 1; }
+    sudo apt-get update && sudo apt upgrade -y && sudo apt-get dist-upgrade -y || { echo "Package update/upgrade failed"; exit 1; }
 
     # Install necessary dependencies if not already installed
     dependencies=(curl ufw unzip cron git libssl-dev zlib1g-dev pkg-config openssl)
