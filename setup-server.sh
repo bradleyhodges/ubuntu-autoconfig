@@ -634,6 +634,99 @@ EOF
     notifempty
 }" > /etc/logrotate.d/fail2ban
 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~ Install Chrony for Accurate Time Synchronization ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
+    echo "Installing chrony for time synchronization..."
+    sudo apt-get install -y chrony || true
+
+    # Configure chrony to use time.nist.gov and set advanced synchronization settings
+    echo "Configuring chrony for accurate time synchronization..."
+    sudo tee /etc/chrony/chrony.conf > /dev/null <<EOF
+# Use NIST time server
+server time.nist.gov iburst maxpoll 6
+
+# Additional backup NTP servers for redundancy
+pool ntp.ubuntu.com iburst
+pool 0.ubuntu.pool.ntp.org iburst
+pool 1.ubuntu.pool.ntp.org iburst
+pool 2.ubuntu.pool.ntp.org iburst
+pool 3.ubuntu.pool.ntp.org iburst
+
+# Allow the system clock to be adjusted if the error is large
+makestep 1.0 3
+
+# Enable logging to monitor time adjustments
+log tracking measurements statistics
+
+# Record frequency changes and system performance metrics
+driftfile /var/lib/chrony/chrony.drift
+rtcsync
+
+# Configuration for kernel clock discipline for better precision
+rtcsync
+rtconutc
+EOF
+
+    # Enable and start the chrony service
+    sudo systemctl enable chrony || true
+    sudo systemctl restart chrony || true
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~ Set System Timezone to UTC ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
+    echo "Configuring the server to use UTC timezone..."
+    sudo timedatectl set-timezone UTC || true
+    sudo timedatectl set-ntp true || true
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~ Unattended Upgrades for Automatic Security Updates ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
+    echo "Installing and enabling unattended-upgrades for automatic security updates..."
+    sudo apt-get install -y unattended-upgrades || true
+    sudo dpkg-reconfigure --priority=low unattended-upgrades || true
+    echo "Unattended-Upgrade::Automatic-Reboot \"true\";" | sudo tee -a /etc/apt/apt.conf.d/50unattended-upgrades || true
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~ Enabling TCP SYN Cookies for DDoS Protection ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
+    echo "Enabling TCP SYN Cookies for protection against SYN flood attacks..."
+    echo "net.ipv4.tcp_syncookies = 1" >> /etc/sysctl.conf || true
+    sysctl -p || true
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~ Restricting Access to /proc and /sys Filesystems ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
+    echo "Restricting access to /proc and /sys filesystems..."
+    echo "mount -o remount,hidepid=2 /proc" >> /etc/rc.local || true
+    echo "mount -o remount,nodev,noexec,nosuid /sys" >> /etc/rc.local || true
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~ Additional security and performance configuration ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
+    # Disable core dumps to avoid exposing sensitive data
+    echo "Disabling core dumps..."
+    echo "* hard core 0" >> /etc/security/limits.conf || true
+
+    # Enable randomizing memory space to prevent various attacks
+    echo "Optimizing TCP settings for performance..."
+    echo "net.ipv4.tcp_window_scaling = 1" >> /etc/sysctl.conf || true
+    echo "net.ipv4.tcp_rmem = 4096 87380 6291456" >> /etc/sysctl.conf || true
+    echo "net.ipv4.tcp_wmem = 4096 65536 6291456" >> /etc/sysctl.conf || true
+    sysctl -p || true
+    
+    # Disable USB storage to prevent unauthorized data transfer
+    echo "Disabling USB ports..."
+    echo "blacklist usb-storage" | sudo tee /etc/modprobe.d/disable-usb-storage.conf || true
+
+    # Enable I/O scheduler optimization for performance
+    echo "Optimizing I/O scheduler..."
+    echo 'noop' | sudo tee /sys/block/sda/queue/scheduler || true
+
+    # Disable unnecessary services
+    echo "Disabling unnecessary services..."
+    sudo systemctl disable apache2 || true
+    sudo systemctl disable avahi-daemon || true
+    sudo systemctl disable cups || true
+    sudo systemctl disable bluetooth || true
+    sudo systemctl disable ModemManager || true
+    sudo systemctl disable lxd || true
+
+    # Configure swap for better memory management
+    sudo fallocate -l 1G /swapfile || true
+    sudo chmod 600 /swapfile || true
+    sudo mkswap /swapfile || true
+    sudo swapon /swapfile || true
+    echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab || true
+
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Ensure services will start on boot ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
     # Make services start on boot
     sudo systemctl enable frankenphp cloudflared ufw fail2ban || true
