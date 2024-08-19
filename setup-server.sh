@@ -179,14 +179,24 @@ EOF
     sudo tee /etc/systemd/system/frankenphp.service > /dev/null <<EOF
 [Unit]
 Description=FrankenPHP server
-After=network.target
+Documentation=https://frankenphp.org/docs/
+After=network.target network-online.target
+Requires=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/frankenphp run --config /etc/caddy/Caddyfile --adapter caddyfile
-Restart=on-failure
+Type=notify
 User=caddyuser
 Group=caddyuser
-LimitNOFILE=100000
+ExecStart=/usr/local/bin/frankenphp run --config /etc/caddy/Caddyfile --adapter caddyfile
+ExecReload=/usr/local/bin/frankenphp reload --config /etc/caddy/Caddyfile --adapter caddyfile --force
+ExecStop=/usr/local/bin/frankenphp stop
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=5s
+LimitNOFILE=1048576
+PrivateTmp=true
+ProtectSystem=full
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
@@ -302,8 +312,11 @@ EOF
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Generate SSL Certificate ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
     echo "Generating SSL certificate..."
-    SSL_CERT_PATH="/etc/ssl/certs/selfsigned.crt"
-    SSL_KEY_PATH="/etc/ssl/private/selfsigned.key"
+    SSL_CERT_PATH="/etc/caddy/ssl/certs/selfsigned.crt"
+    SSL_KEY_PATH="/etc/caddy/ssl/private/selfsigned.key"
+
+    # Create the directories
+    sudo mkdir -p /etc/caddy/ssl/certs /etc/caddy/ssl/private
 
     # Create SSL certificate if it doesn't exist
     if [ ! -f "$SSL_CERT_PATH" ] || [ ! -f "$SSL_KEY_PATH" ]; then
@@ -316,7 +329,16 @@ EOF
         echo "SSL certificate already exists, skipping generation."
     fi
 
+    # Set the correct permissions for the SSL certificate
+    sudo chmod 600 "$SSL_KEY_PATH"
+    sudo chmod 644 "$SSL_CERT_PATH"
+
+    # Give the caddyuser access to the SSL certificate and key file
+    sudo chown -R caddyuser:caddyuser "$SSL_KEY_PATH"
+    sudo chown -R caddyuser:caddyuser "$SSL_CERT_PATH"
+
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Configure Caddy for PHP with FrankenPHP  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
+    sudo mkdir -p /etc/caddy
     cat <<EOF > /etc/caddy/Caddyfile
 {
     email $SERVER_EMAIL  # Set your email for Let's Encrypt notifications
@@ -327,15 +349,14 @@ EOF
     }
 }
 
-:80, :443 {
+:443 {
     root * $PUBLIC_ROOT_PATH
-    frankenphp
+    php_server {  # This will enable the FrankenPHP integration
+        # Add your PHP handling configuration here
+    }
 
     # Enable gzip and Brotli compression
 	encode zstd br gzip
-
-	# Execute PHP files in the current directory and serve assets
-	php_server
 
     # Enable security headers
     header {
@@ -351,20 +372,6 @@ EOF
 
     tls $SSL_CERT_PATH $SSL_KEY_PATH  # Add TLS with the self-signed certificate
 
-    # Disable directory browsing for security
-    file_server browse off
-
-    # Trusted Proxies for Cloudflare
-    trusted_proxies cloudflare {
-        interval 12h
-        timeout 15s
-    }
-
-    # Real IP handling for Cloudflare
-    realip {
-        from cloudflare
-    }
-
     try_files {path} {path}/ /index.php?{query}
 
     @phpFiles {
@@ -373,11 +380,6 @@ EOF
     handle @phpFiles {
         try_files {path} =404
     }
-
-    # Increase Keep-Alive duration for better performance with persistent connections
-    transport http {
-        keepalive 60s
-    }
 }
 EOF
 
@@ -385,6 +387,7 @@ EOF
     # Set permissions for the document root
     chown -R caddyuser:caddyuser "$DOCUMENT_ROOT_PATH"
     chmod -R 755 "$DOCUMENT_ROOT_PATH"
+    sudo chown -R caddyuser:caddyuser /etc/caddy
 
     # Restart FrankenPHP service (Caddy) to apply the new user and group
     sudo systemctl restart frankenphp
