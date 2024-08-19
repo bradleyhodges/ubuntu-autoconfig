@@ -162,7 +162,6 @@ EOF
     echo "PHP successfully installed. Version: $php_version"
 
     # Find the PHP configuration file (php.ini)
-    # Find the PHP configuration file (php.ini)
     PHP_INI=$(php --ini | grep "Loaded Configuration File" | awk '{print $4}')
 
     if [ -z "$PHP_INI" ]; then
@@ -181,16 +180,15 @@ EOF
         sed -i 's/^display_errors\s*=.*/display_errors = Off/' "$PHP_INI" || true
         sed -i 's/^file_uploads\s*=.*/file_uploads = On/' "$PHP_INI" || true
         sed -i 's/^upload_max_filesize\s*=.*/upload_max_filesize = 1M/' "$PHP_INI" || true
-        sed -i 's/^allow_url_fopen\s*=.*/allow_url_fopen = Off/' "$PHP_INI" || true
         sed -i 's|^session.save_path\s*=.*|session.save_path = "'$DOCUMENT_ROOT_PATH'/session"|' "$PHP_INI" || true
         sed -i 's|^upload_tmp_dir\s*=.*|upload_tmp_dir = "'$DOCUMENT_ROOT_PATH'/session"|' "$PHP_INI" || true
         sed -i '/^disable_functions/s/=.*/=exec,passthru,shell_exec,system,proc_open,popen,curl_exec,curl_multi_exec,parse_ini_file,show_source/' "$PHP_INI" || true
 
         # If open_basedir isn't set, add it
         if ! grep -q '^open_basedir' "$PHP_INI"; then
-            echo 'open_basedir = "'$DOCUMENT_ROOT_PATH'/:/tmp/:/var/lib/php/sessions/"' >> "$PHP_INI" || true
+            echo 'open_basedir = "'$DOCUMENT_ROOT_PATH'/:/tmp/:/var/lib/php/sessions/:/usr/local/bin/"' >> "$PHP_INI" || true
         else
-            sed -i 's|^open_basedir\s*=.*|open_basedir = "'$DOCUMENT_ROOT_PATH'/:/tmp/:/var/lib/php/sessions/"|' "$PHP_INI" || true
+            sed -i 's|^open_basedir\s*=.*|open_basedir = "'$DOCUMENT_ROOT_PATH'/:/tmp/:/var/lib/php/sessions/:/usr/local/bin/"|' "$PHP_INI" || true
         fi
 
         # Harden session security
