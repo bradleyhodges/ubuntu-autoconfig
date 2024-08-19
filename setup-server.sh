@@ -182,7 +182,6 @@ EOF
         sed -i 's/^upload_max_filesize\s*=.*/upload_max_filesize = 1M/' "$PHP_INI" || true
         sed -i 's|^session.save_path\s*=.*|session.save_path = "'$DOCUMENT_ROOT_PATH'/session"|' "$PHP_INI" || true
         sed -i 's|^upload_tmp_dir\s*=.*|upload_tmp_dir = "'$DOCUMENT_ROOT_PATH'/session"|' "$PHP_INI" || true
-        sed -i '/^disable_functions/s/=.*/=exec,passthru,shell_exec,system,proc_open,popen,curl_exec,curl_multi_exec,parse_ini_file,show_source/' "$PHP_INI" || true
 
         # If open_basedir isn't set, add it
         if ! grep -q '^open_basedir' "$PHP_INI"; then
@@ -220,17 +219,24 @@ EOF
         # Restrict PHP's access to specific directories
         echo "open_basedir = \"$DOCUMENT_ROOT_PATH/:/tmp/:/var/lib/php/sessions/\"" >> "$PHP_INI" || true
 
-        # Reload PHP-FPM to apply changes (if applicable)
-        php_fpm_service=$(systemctl list-units --type=service --state=running | grep -oP 'php[0-9]+\.[0-9]+-fpm\.service' | head -n 1)
-
-        if [ -n "$php_fpm_service" ]; then
-            echo "Reloading PHP-FPM service: $php_fpm_service"
-            systemctl reload "$php_fpm_service" || true
-        else
-            echo "No active PHP-FPM service found. Please manually reload your PHP service."
-        fi
-
         echo "Security and performance settings applied successfully."
+    fi
+
+    # Update PHP to log errors to Caddy's error log
+    sed -i "s|;*log_errors =.*|log_errors = On|" /etc/php/*/fpm/php.ini || true
+    sed -i "s|;*error_log =.*|error_log = /var/log/caddy/error.log|" /etc/php/*/fpm/php.ini || true
+
+    sed -i "s|;*log_errors =.*|log_errors = On|" /etc/php/*/cli/php.ini || true
+    sed -i "s|;*error_log =.*|error_log = /var/log/caddy/error.log|" /etc/php/*/cli/php.ini || true
+
+    # Reload PHP-FPM to apply changes (if applicable)
+    php_fpm_service=$(systemctl list-units --type=service --state=running | grep -oP 'php[0-9]+\.[0-9]+-fpm\.service' | head -n 1)
+
+    if [ -n "$php_fpm_service" ]; then
+        echo "Reloading PHP-FPM service: $php_fpm_service"
+        systemctl reload "$php_fpm_service" || true
+    else
+        echo "No active PHP-FPM service found. Please manually reload your PHP service."
     fi
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Install FrankenPHP (Prebuilt Binary) ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
@@ -268,6 +274,7 @@ LimitNOFILE=1048576
 PrivateTmp=true
 ProtectSystem=full
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+Environment=PHPRC=$PHP_INI
 
 [Install]
 WantedBy=multi-user.target
@@ -418,6 +425,11 @@ EOF
     servers {
         protocols h1 h2 h3  # Enable HTTP/1, HTTP/2, and HTTP/3 (QUIC)
     }
+    # Error logs configuration
+    log {
+        level ERROR
+        output file /var/log/caddy/error.log
+    }
 }
 
 :443 {
@@ -455,7 +467,7 @@ EOF
     # Add logging for access and errors
     log {
         output file /var/log/caddy/access.log
-        output file /var/log/caddy/error.log
+        format console  # You can use 'format console' or 'format json' depending on your preference
     }
 }
 EOF
@@ -734,8 +746,8 @@ EOF
     echo "Installing the DigitalOcean Metrics Agent..."
     curl -sSL https://repos.insights.digitalocean.com/install.sh | sudo bash || true
 
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~ Create Custom PHP Stream Wrapper for @/ ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
-    echo "Creating custom PHP stream wrapper for '@/'."
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~ Create Custom PHP Stream Wrapper for app:// ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
+    echo "Creating custom PHP stream wrapper for 'at:/'."
 
     STREAM_WRAPPER_DIR="/etc/caddy/php-config"
     STREAM_WRAPPER_FILE="$STREAM_WRAPPER_DIR/init_stream_wrapper.php"
@@ -747,22 +759,28 @@ EOF
     cat <<EOF > "$STREAM_WRAPPER_FILE"
 <?php
 /**
- * Custom stream wrapper to map "@/path" to the DOCUMENT_ROOT_PATH.
+ * Custom stream wrapper to map "app://path" to the DOCUMENT_ROOT_PATH.
  */
 
-class AtSymbolStreamWrapper {
+class AppStreamWrapper {
     private \$basePath;
+    private \$handle;
 
     public function __construct() {
-        // Set base path to the DOCUMENT_ROOT_PATH from the environment or a fallback
+        // Set base path to the DOCUMENT_ROOT_PATH from the environment or a default value
         \$this->basePath = getenv('DOCUMENT_ROOT_PATH') ?: '$DOCUMENT_ROOT_PATH';
     }
 
     public function stream_open(\$path, \$mode, \$options, &\$opened_path) {
-        // Remove the "@/"" prefix and prepend the base path
-        \$filePath = str_replace('file://@/', \$this->basePath . '/', \$path);
+        \$filePath = \$this->resolveFilePath(\$path);
+
+        // Check if the file exists before opening it
+        if (!file_exists(\$filePath)) {
+            return false;
+        }
+
         \$this->handle = fopen(\$filePath, \$mode);
-        return (bool)\$this->handle;
+        return (bool) \$this->handle;
     }
 
     public function stream_read(\$count) {
@@ -786,30 +804,62 @@ class AtSymbolStreamWrapper {
     }
 
     public function url_stat(\$path, \$flags) {
-        // Handle stat for files
-        \$filePath = str_replace('file://@/', \$this->basePath . '/', \$path);
+        \$filePath = \$this->resolveFilePath(\$path);
         return @stat(\$filePath);
+    }
+
+    private function resolveFilePath(\$path) {
+        return str_replace('app:/', \$this->basePath . '/', \$path);
     }
 }
 
-// Register the "@" stream wrapper
-stream_wrapper_register('@', 'AtSymbolStreamWrapper');
+// Register the "app:" stream wrapper
+stream_wrapper_register('app', 'AppStreamWrapper');
 EOF
 
     # Ensure the file is owned by the appropriate user and has secure permissions
     chown caddyuser:caddyuser "$STREAM_WRAPPER_FILE"
     chmod 600 "$STREAM_WRAPPER_FILE"
 
-    # Set up auto_prepend_file to include the stream wrapper initialization
-    sed -i "s|;auto_prepend_file =.*|auto_prepend_file = $STREAM_WRAPPER_FILE|" /etc/php/*/fpm/php.ini || true
-    sed -i "s|;auto_prepend_file =.*|auto_prepend_file = $STREAM_WRAPPER_FILE|" /etc/php/*/cli/php.ini || true
+    # Explicitly search for the PHP-FPM and CLI configuration files
+    PHP_INI_FPM=$(find /etc/php -name php.ini | grep "/fpm/")
+    PHP_INI_CLI=$(find /etc/php -name php.ini | grep "/cli/")
 
-    # Reload PHP-FPM to apply the changes
-    if [ -n "$php_fpm_service" ]; then
-        systemctl reload "$php_fpm_service" || true
+    # Update auto_prepend_file directive in PHP-FPM configuration file
+    if [ -f "$PHP_INI_FPM" ]; then
+        if grep -q '^auto_prepend_file' "$PHP_INI_FPM"; then
+            sed -i "s|^auto_prepend_file.*|auto_prepend_file = \"$STREAM_WRAPPER_FILE\"|" "$PHP_INI_FPM" || true
+        else
+            echo "auto_prepend_file = \"$STREAM_WRAPPER_FILE\"" >> "$PHP_INI_FPM" || true
+        fi
+        echo "Updated $PHP_INI_FPM with auto_prepend_file = \"$STREAM_WRAPPER_FILE\""
+    else
+        echo "PHP-FPM configuration file not found."
     fi
 
-    echo "Custom stream wrapper for '@/path' has been configured in $STREAM_WRAPPER_FILE."
+    # Update auto_prepend_file directive in PHP-CLI configuration file
+    if [ -f "$PHP_INI_CLI" ]; then
+        if grep -q '^auto_prepend_file' "$PHP_INI_CLI"; then
+            sed -i "s|^auto_prepend_file.*|auto_prepend_file = \"$STREAM_WRAPPER_FILE\"|" "$PHP_INI_CLI" || true
+        else
+            echo "auto_prepend_file = \"$STREAM_WRAPPER_FILE\"" >> "$PHP_INI_CLI" || true
+        fi
+        echo "Updated $PHP_INI_CLI with auto_prepend_file = \"$STREAM_WRAPPER_FILE\""
+    else
+        echo "PHP-CLI configuration file not found."
+    fi
+
+    # Reload PHP-FPM service to apply the changes
+    php_fpm_service=$(systemctl list-units --type=service --state=running | grep -oP 'php[0-9]+\.[0-9]+-fpm\.service' | head -n 1)
+
+    if [ -n "$php_fpm_service" ]; then
+        echo "Reloading PHP-FPM service: $php_fpm_service"
+        systemctl reload "$php_fpm_service" || true
+    else
+        echo "No active PHP-FPM service found. Please manually reload your PHP service."
+    fi
+
+    echo "Custom stream wrapper for 'at:/path' has been configured in $STREAM_WRAPPER_FILE."
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Set custom MOTD  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
     # Customize the Message of the Day (MOTD)
@@ -847,7 +897,7 @@ Next Steps:
  4. Access your server through your configured Cloudflare domain
 
 A dynamic utility import has also been installed. Import utilities in your 
-PHP scripts using `require_once '@utilities/utility.php'`
+PHP scripts using `require_once 'app://utilities/utility.php'`
 
 This server has been secured with a firewall. To allow additional ports, run:
     > sudo ufw allow <port_number>
