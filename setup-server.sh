@@ -186,11 +186,11 @@ EOF
 
         # If open_basedir isn't set, add it
         if ! grep -q '^open_basedir' "$PHP_INI"; then
-            echo 'open_basedir = "'$DOCUMENT_ROOT_PATH'/:/tmp/:/var/lib/php/sessions/:/usr/local/bin/"' >> "$PHP_INI" || true
+            echo 'open_basedir = "'$DOCUMENT_ROOT_PATH'/:/tmp/:/var/lib/php/sessions/:/usr/local/bin/:/etc/caddy/php-config/"' >> "$PHP_INI" || true
         else
-            sed -i 's|^open_basedir\s*=.*|open_basedir = "'$DOCUMENT_ROOT_PATH'/:/tmp/:/var/lib/php/sessions/:/usr/local/bin/"|' "$PHP_INI" || true
+            sed -i 's|^open_basedir\s*=.*|open_basedir = "'$DOCUMENT_ROOT_PATH'/:/tmp/:/var/lib/php/sessions/:/usr/local/bin/:/etc/caddy/php-config/"|' "$PHP_INI" || true
         fi
-
+        
         # Harden session security
         sed -i 's/^session.cookie_httponly\s*=.*/session.cookie_httponly = 1/' "$PHP_INI" || true
         sed -i 's/^session.cookie_secure\s*=.*/session.cookie_secure = 1/' "$PHP_INI" || true
@@ -733,6 +733,83 @@ EOF
     # Install the DigitalOcean Metrics Agent
     echo "Installing the DigitalOcean Metrics Agent..."
     curl -sSL https://repos.insights.digitalocean.com/install.sh | sudo bash || true
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~ Create Custom PHP Stream Wrapper for @/ ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
+    echo "Creating custom PHP stream wrapper for '@/'."
+
+    STREAM_WRAPPER_DIR="/etc/caddy/php-config"
+    STREAM_WRAPPER_FILE="$STREAM_WRAPPER_DIR/init_stream_wrapper.php"
+
+    # Create the directory if it doesn't exist
+    mkdir -p "$STREAM_WRAPPER_DIR" || true
+
+    # Create the PHP file that registers the custom stream wrapper
+    cat <<EOF > "$STREAM_WRAPPER_FILE"
+<?php
+/**
+ * Custom stream wrapper to map "@/path" to the DOCUMENT_ROOT_PATH.
+ */
+
+class AtSymbolStreamWrapper {
+    private \$basePath;
+
+    public function __construct() {
+        // Set base path to the DOCUMENT_ROOT_PATH from the environment or a fallback
+        \$this->basePath = getenv('DOCUMENT_ROOT_PATH') ?: '$DOCUMENT_ROOT_PATH';
+    }
+
+    public function stream_open(\$path, \$mode, \$options, &\$opened_path) {
+        // Remove the "@/"" prefix and prepend the base path
+        \$filePath = str_replace('file://@/', \$this->basePath . '/', \$path);
+        \$this->handle = fopen(\$filePath, \$mode);
+        return (bool)\$this->handle;
+    }
+
+    public function stream_read(\$count) {
+        return fread(\$this->handle, \$count);
+    }
+
+    public function stream_write(\$data) {
+        return fwrite(\$this->handle, \$data);
+    }
+
+    public function stream_close() {
+        fclose(\$this->handle);
+    }
+
+    public function stream_eof() {
+        return feof(\$this->handle);
+    }
+
+    public function stream_stat() {
+        return fstat(\$this->handle);
+    }
+
+    public function url_stat(\$path, \$flags) {
+        // Handle stat for files
+        \$filePath = str_replace('file://@/', \$this->basePath . '/', \$path);
+        return @stat(\$filePath);
+    }
+}
+
+// Register the "@" stream wrapper
+stream_wrapper_register('@', 'AtSymbolStreamWrapper');
+EOF
+
+    # Ensure the file is owned by the appropriate user and has secure permissions
+    chown caddyuser:caddyuser "$STREAM_WRAPPER_FILE"
+    chmod 600 "$STREAM_WRAPPER_FILE"
+
+    # Set up auto_prepend_file to include the stream wrapper initialization
+    sed -i "s|;auto_prepend_file =.*|auto_prepend_file = $STREAM_WRAPPER_FILE|" /etc/php/*/fpm/php.ini || true
+    sed -i "s|;auto_prepend_file =.*|auto_prepend_file = $STREAM_WRAPPER_FILE|" /etc/php/*/cli/php.ini || true
+
+    # Reload PHP-FPM to apply the changes
+    if [ -n "$php_fpm_service" ]; then
+        systemctl reload "$php_fpm_service" || true
+    fi
+
+    echo "Custom stream wrapper for '@/path' has been configured in $STREAM_WRAPPER_FILE."
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Set custom MOTD  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
     # Customize the Message of the Day (MOTD)
