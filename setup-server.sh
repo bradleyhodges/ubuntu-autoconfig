@@ -321,6 +321,9 @@ EOF
     COMPOSER_JSON_PATH="$UTILITIES_PATH/composer.json"
     CUSTOM_VENDOR_DIR="$COMPOSER_PATH/vendor"
 
+    # Configure the deployignore file path
+    DEPLOYIGNORE_FILE="$UTILITIES_PATH/.deployignore"
+
     # Ensure Git trusts the utilities directory
     git config --global --add safe.directory "$UTILITIES_PATH"
 
@@ -329,23 +332,42 @@ EOF
 
     # Make Composer use the custom vendor directory
     export COMPOSER_VENDOR_DIR="$CUSTOM_VENDOR_DIR"
-    # export COMPOSER_HOME="$COMPOSER_PATH"
 
     # Make Composer ALWAYS use the custom home (even after this script is done running)
     echo 'export COMPOSER_VENDOR_DIR="$CUSTOM_VENDOR_DIR"' >> ~/.profile
-    # echo 'export COMPOSER_HOME="$COMPOSER_PATH"' >> ~/.profile
 
     # Clone the SES PHP API Utilities repository if not already cloned
     if [ ! -d "$UTILITIES_PATH/.git" ]; then
         echo "Cloning SES PHP API Utilities from GitHub..."
-        git clone https://github.com/dfes-ses/common-api-utilities.git "$UTILITIES_PATH" || { echo "Failed to clone SES API Utilities"; exit 1; }
+        git clone --no-checkout https://github.com/dfes-ses/common-api-utilities.git "$UTILITIES_PATH" || { echo "Failed to clone SES API Utilities"; exit 1; }
     else
         echo "SES PHP API Utilities repository already cloned, pulling the latest changes..."
-        cd "$UTILITIES_PATH" && git pull || { echo "Failed to update SES API Utilities"; exit 1; }
+        cd "$UTILITIES_PATH" && git fetch --all || { echo "Failed to fetch updates from GitHub"; exit 1; }
     fi
 
     # cd to the utilities directory
     cd "$UTILITIES_PATH"
+
+    # Configure sparse-checkout
+    git config core.sparseCheckout true
+
+    # Generate sparse-checkout file based on .deployignore
+    echo "/*" > .git/info/sparse-checkout
+
+    # Read the .deployignore file and append the exclude patterns
+    if [ -f ".deployignore" ]; then
+        while IFS= read -r pattern; do
+            # Remove leading/trailing whitespace
+            pattern=$(echo "$pattern" | xargs)
+            # Skip empty lines and comments
+            if [ -n "$pattern" ] && [ "${pattern:0:1}" != "#" ]; then
+                echo "!$pattern" >> .git/info/sparse-checkout
+            fi
+        done < .deployignore
+    fig
+
+    # Check out the necessary files
+    git checkout
 
     # Create composer.json if it doesn't exist
     if [ ! -f "$COMPOSER_JSON_PATH" ]; then
@@ -378,6 +400,43 @@ EOF
 
     # Install Sentry SDK for PHP as well
     composer require sentry/sentry --no-dev --optimize-autoloader --no-interaction || true;
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~ Install a cron to maintain SES PHP API Utilities  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
+    # Create the update script
+    cat <<EOF > "$UTILITIES_PATH/update-repo.sh"
+#!/bin/bash
+
+# Ensure Git trusts the utilities directory
+git config --global --add safe.directory "$UTILITIES_PATH"
+
+# Change to the utilities directory
+cd "$UTILITIES_PATH" || exit 1
+
+# Pull the latest changes
+git fetch --all || exit 1
+git reset --hard origin/main || exit 1
+git clean -fd || exit 1
+
+# Read .deployignore and remove ignored files
+if [ -f "$DEPLOYIGNORE_FILE" ]; then
+    while IFS= read -r pattern; do
+        if [ -n "\$pattern" ] && [ "\$pattern" != "#" ]; then
+            # Remove ignored files
+            find . -type f -name "\$pattern" -delete
+        fi
+    done < "$DEPLOYIGNORE_FILE"
+fi
+EOF
+
+    # Make the update script executable
+    chmod +x "$UTILITIES_PATH/update-repo.sh"
+
+    # Set up a cron job to pull changes periodically
+    CRON_JOB="@hourly bash $UTILITIES_PATH/update-repo.sh > /dev/null 2>&1"
+
+    # Check if the cron job is already set
+    (crontab -l | grep -F "$CRON_JOB") || (crontab -l ; echo "$CRON_JOB") | crontab -
+    echo "Configured SES PHP API Utilities periodically refresh scripts"
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Configure PHP for Caddy  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
     # Configure PHP to work with Caddy
