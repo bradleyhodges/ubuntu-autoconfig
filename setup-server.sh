@@ -30,6 +30,7 @@ CF_ZONE_ID="79df1b429fbc516754f7cf9d297fdcbf" # Replace with your Cloudflare web
 SENTRY_DSN="" # Replace with your Sentry DSN 
 SERVER_FQDN=" # Replace with your server's public hostname (FQDN) - eg. api.vitalis.wases.com.au"
 DOCUMENT_ROOT_PATH="/var/www" # This is where your files will live :)
+ALLOW_FILE_UPLOADS="false" # Set to "true" to allow file uploads, "false" to disallow
 
 # Things you probably don't need to change, but you can if you want to:
 PUBLIC_ROOT_PATH="$DOCUMENT_ROOT_PATH/public" # This is where your public files will live
@@ -439,13 +440,49 @@ EOF
     echo "Configured SES PHP API Utilities periodically refresh scripts"
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Configure PHP for Caddy  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
-    # Configure PHP to work with Caddy
-    sed -i 's/;cgi.fix_pathinfo=1/cgi.fix_pathinfo=0/' /etc/php/*/cli/php.ini
-    sed -i 's/^;opcache.enable=1/opcache.enable=1/' /etc/php/*/cli/php.ini
-    sed -i 's/^;opcache.memory_consumption=128/opcache.memory_consumption=256/' /etc/php/*/cli/php.ini
-    sed -i 's/^;opcache.interned_strings_buffer=8/opcache.interned_strings_buffer=16/' /etc/php/*/cli/php.ini
-    sed -i 's/^;opcache.max_accelerated_files=10000/opcache.max_accelerated_files=20000/' /etc/php/*/cli/php.ini
-    sed -i 's/^;opcache.revalidate_freq=2/opcache.revalidate_freq=60/' /etc/php/*/cli/php.ini
+    # Function to update php.ini file
+    update_php_ini() {
+        local php_ini_file=$1
+        local allow_uploads=$2
+
+        # Enable fileinfo extension
+        if grep -q "^;extension=fileinfo" "$php_ini_file"; then
+            sed -i "s/^;extension=fileinfo/extension=fileinfo/" "$php_ini_file"
+        elif ! grep -q "^extension=fileinfo" "$php_ini_file"; then
+            echo "extension=fileinfo" >> "$php_ini_file"
+        fi
+
+        # Set file_uploads directive based on ALLOW_FILE_UPLOADS value
+        if [ "$allow_uploads" = "true" ]; then
+            sed -i "s/^file_uploads = .*/file_uploads = On/" "$php_ini_file"
+            sed -i "s/^upload_max_filesize = .*/upload_max_filesize = 50M/" "$php_ini_file"
+            sed -i "s/^post_max_size = .*/post_max_size = 50M/" "$php_ini_file"
+        else
+            sed -i "s/^file_uploads = .*/file_uploads = Off/" "$php_ini_file"
+        fi
+
+        # Apply additional optimizations
+        sed -i 's/;cgi.fix_pathinfo=1/cgi.fix_pathinfo=0/' "$php_ini_file"
+        sed -i 's/^;opcache.enable=1/opcache.enable=1/' "$php_ini_file"
+        sed -i 's/^;opcache.memory_consumption=128/opcache.memory_consumption=256/' "$php_ini_file"
+        sed -i 's/^;opcache.interned_strings_buffer=8/opcache.interned_strings_buffer=16/' "$php_ini_file"
+        sed -i 's/^;opcache.max_accelerated_files=10000/opcache.max_accelerated_files=20000/' "$php_ini_file"
+        sed -i 's/^;opcache.revalidate_freq=2/opcache.revalidate_freq=60/' "$php_ini_file"
+    }
+
+    # Find and update all relevant php.ini files
+    find /etc/php -type f -name "php.ini" | while read -r php_ini; do
+        echo "Updating $php_ini..."
+        update_php_ini "$php_ini" "$ALLOW_FILE_UPLOADS"
+    done
+
+    # Reload PHP-FPM service to apply the changes
+    if systemctl is-active --quiet php-fpm; then
+        echo "Reloading PHP-FPM service..."
+        systemctl reload php-fpm
+    fi
+
+    echo "PHP configuration updated successfully."
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Generate SSL Certificate ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
     echo "Generating SSL certificate..."
