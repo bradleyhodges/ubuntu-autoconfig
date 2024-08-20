@@ -24,19 +24,20 @@ set -x
 # *********************************************************** #
 # Things you definitely need to check and change if necessary:
 SERVER_EMAIL="sysadmin@wases.com.au" 
-CF_API_TOKEN="" # Replace with your Cloudflare API token with DNS, Tunnel, and Certificate permissions
 CF_ACCOUNT_ID="26801e6068adefb82b51e4c3fe327105" # Replace with your Cloudflare Account ID
 CF_ZONE_ID="79df1b429fbc516754f7cf9d297fdcbf" # Replace with your Cloudflare website's Zone ID
 SENTRY_DSN="" # Replace with your Sentry DSN 
-SERVER_FQDN=" # Replace with your server's public hostname (FQDN) - eg. api.vitalis.wases.com.au"
+SERVER_FQDN="" # Replace with your server's public hostname (FQDN) - eg. api.vitalis.wases.com.au"
 DOCUMENT_ROOT_PATH="/var/www" # This is where your files will live :)
 ALLOW_FILE_UPLOADS="false" # Set to "true" to allow file uploads, "false" to disallow
 
 # Things you probably don't need to change, but you can if you want to:
+LOGS_PATH="/var/log/caddy" # This is where all of the logs produced by the server will be stored
 PUBLIC_ROOT_PATH="$DOCUMENT_ROOT_PATH/public" # This is where your public files will live
 UTILITIES_PATH="$DOCUMENT_ROOT_PATH/utilities" # This is where your utilities will live
 COMPOSER_PATH="$DOCUMENT_ROOT_PATH/composer" # This is where Composer will be installed
 COMPOSER_AUTOLOAD_PATH="$COMPOSER_PATH/vendor/autoload.php" # This is where Composer autoload will be generated
+ALLOW_PHP_REQUIRE_OUTSIDE_OF_DOCUMENT_ROOT="false" # Set to "true" to allow PHP require/require_once outside of the document root, "false" to disallow
 # *********************************************************** #
 
 # ` > start droplet configuration script
@@ -63,11 +64,6 @@ set -e # Exit script on error
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Check for Required Configuration Variables  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
     if [ -z "$SERVER_EMAIL" ]; then
         echo "Error: Server Email Address is not set. Exiting."
-        exit 1
-    fi
-
-    if [ -z "$CF_API_TOKEN" ]; then
-        echo "Error: Cloudflare API token is not set. Exiting."
         exit 1
     fi
 
@@ -123,7 +119,7 @@ set -e # Exit script on error
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Set up a non-privileged user for FrankenPHP (Caddy) to use  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
     # Create directories if they don't already exist
-    directories=($DOCUMENT_ROOT_PATH $PUBLIC_ROOT_PATH $UTILITIES_PATH $COMPOSER_PATH /etc/caddy /var/lib/caddy /var/log/caddy)
+    directories=($DOCUMENT_ROOT_PATH $PUBLIC_ROOT_PATH $UTILITIES_PATH $COMPOSER_PATH /etc/caddy /var/lib/caddy $LOGS_PATH)
     for dir in "${directories[@]}"; do
         [ ! -d "$dir" ] && mkdir -p "$dir"
     done
@@ -137,7 +133,7 @@ set -e # Exit script on error
     fi
 
     # Ensure the appropriate directories are owned by the Caddy user
-    sudo chown -R caddyuser:caddyuser $DOCUMENT_ROOT_PATH /etc/caddy /var/lib/caddy /var/log/caddy
+    sudo chown -R caddyuser:caddyuser $DOCUMENT_ROOT_PATH /etc/caddy /var/lib/caddy $LOGS_PATH
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Set up environment variables  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
     # Set up environment variables
@@ -148,6 +144,8 @@ UTILITIES_PATH=$UTILITIES_PATH
 CF_ACCOUNT_ID=$CF_ACCOUNT_ID
 CF_ZONE_ID=$CF_ZONE_ID
 SERVER_FQDN=$SERVER_FQDN
+LOGS_PATH=$LOGS_PATH
+FORCE_SAFE_REQUIRES=$ALLOW_PHP_REQUIRE_OUTSIDE_OF_DOCUMENT_ROOT
 EOF
 
     # Secure the .env file: make it readable only by the web server user
@@ -184,13 +182,6 @@ EOF
         sed -i 's|^session.save_path\s*=.*|session.save_path = "'$DOCUMENT_ROOT_PATH'/session"|' "$PHP_INI" || true
         sed -i 's|^upload_tmp_dir\s*=.*|upload_tmp_dir = "'$DOCUMENT_ROOT_PATH'/session"|' "$PHP_INI" || true
 
-        # If open_basedir isn't set, add it
-        if ! grep -q '^open_basedir' "$PHP_INI"; then
-            echo 'open_basedir = "'$DOCUMENT_ROOT_PATH'/:/tmp/:/var/lib/php/sessions/:/usr/local/bin/:/etc/caddy/php-config/"' >> "$PHP_INI" || true
-        else
-            sed -i 's|^open_basedir\s*=.*|open_basedir = "'$DOCUMENT_ROOT_PATH'/:/tmp/:/var/lib/php/sessions/:/usr/local/bin/:/etc/caddy/php-config/"|' "$PHP_INI" || true
-        fi
-        
         # Harden session security
         sed -i 's/^session.cookie_httponly\s*=.*/session.cookie_httponly = 1/' "$PHP_INI" || true
         sed -i 's/^session.cookie_secure\s*=.*/session.cookie_secure = 1/' "$PHP_INI" || true
@@ -211,24 +202,21 @@ EOF
         sed -i 's/^;opcache.validate_timestamps\s*=.*/opcache.validate_timestamps = 1/' "$PHP_INI" || true
 
         # Disable dangerous PHP functions
-        sed -i 's/^disable_functions\s*=.*/disable_functions = exec,passthru,shell_exec,system,proc_open,popen,curl_exec,curl_multi_exec,parse_ini_file,show_source/' "$PHP_INI" || true
+        sed -i 's/^disable_functions\s*=.*/disable_functions = exec,passthru,shell_exec,system,popen,curl_exec,curl_multi_exec,parse_ini_file,show_source/' "$PHP_INI" || true
 
         # Additional security measures
         echo "session.cookie_samesite = Strict" >> "$PHP_INI" || true  # Prevent CSRF attacks
         echo "cgi.fix_pathinfo = 0" >> "$PHP_INI" || true  # Prevent path disclosure vulnerabilities
-
-        # Restrict PHP's access to specific directories
-        echo "open_basedir = \"$DOCUMENT_ROOT_PATH/:/tmp/:/var/lib/php/sessions/\"" >> "$PHP_INI" || true
 
         echo "Security and performance settings applied successfully."
     fi
 
     # Update PHP to log errors to Caddy's error log
     sed -i "s|;*log_errors =.*|log_errors = On|" /etc/php/*/fpm/php.ini || true
-    sed -i "s|;*error_log =.*|error_log = /var/log/caddy/error.log|" /etc/php/*/fpm/php.ini || true
+    sed -i "s|;*error_log =.*|error_log = $LOGS_PATH/error.log|" /etc/php/*/fpm/php.ini || true
 
     sed -i "s|;*log_errors =.*|log_errors = On|" /etc/php/*/cli/php.ini || true
-    sed -i "s|;*error_log =.*|error_log = /var/log/caddy/error.log|" /etc/php/*/cli/php.ini || true
+    sed -i "s|;*error_log =.*|error_log = $LOGS_PATH/error.log|" /etc/php/*/cli/php.ini || true
 
     # Reload PHP-FPM to apply changes (if applicable)
     php_fpm_service=$(systemctl list-units --type=service --state=running | grep -oP 'php[0-9]+\.[0-9]+-fpm\.service' | head -n 1)
@@ -283,13 +271,6 @@ EOF
 
     # Reload systemd to apply the new service file
     sudo systemctl daemon-reload
-
-    # Enable and start the FrankenPHP service
-    sudo systemctl enable frankenphp
-    sudo systemctl start frankenphp || { echo "Failed to start FrankenPHP service"; exit 1; }
-
-    # Verify if the service is running
-    sudo systemctl is-active --quiet frankenphp && echo "FrankenPHP service is running." || { echo "FrankenPHP service failed to start"; exit 1; }
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Install Composer  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
     # Set COMPOSER_ALLOW_SUPERUSER to suppress warnings when running as root
@@ -365,7 +346,7 @@ EOF
                 echo "!$pattern" >> .git/info/sparse-checkout
             fi
         done < .deployignore
-    fig
+    fi
 
     # Check out the necessary files
     git checkout
@@ -398,9 +379,6 @@ EOF
         echo "Failed to install Composer dependencies."
         exit 1
     fi
-
-    # Install Sentry SDK for PHP as well
-    composer require sentry/sentry --no-dev --optimize-autoloader --no-interaction || true;
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Install a cron to maintain SES PHP API Utilities  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
     # Create the update script
@@ -524,7 +502,7 @@ EOF
     # Error logs configuration
     log {
         level ERROR
-        output file /var/log/caddy/error.log
+        output file $LOGS_PATH/error.log
     }
 }
 
@@ -562,11 +540,18 @@ EOF
 
     # Add logging for access and errors
     log {
-        output file /var/log/caddy/access.log
+        output file $LOGS_PATH/access.log
         format console  # You can use 'format console' or 'format json' depending on your preference
     }
 }
 EOF
+
+    # Enable and start the FrankenPHP service
+    sudo systemctl enable frankenphp
+    sudo systemctl start frankenphp || { echo "Failed to start FrankenPHP service"; exit 1; }
+
+    # Verify if the service is running
+    sudo systemctl is-active --quiet frankenphp && echo "FrankenPHP service is running." || { echo "FrankenPHP service failed to start"; exit 1; }
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Make Caddy use the non-privileged user  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
     # Set permissions for the document root
@@ -614,10 +599,10 @@ EOF
     ufw reload
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Create a cron job to update Cloudflare IPs automatically and allow them in ufw ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
-    (crontab -l ; echo "0 11 * * TUE /usr/bin/curl -sf https://www.cloudflare.com/ips-v4 -o /tmp/cloudflare-ips-v4.txt && /usr/bin/curl -sf https://www.cloudflare.com/ips-v6 -o /tmp/cloudflare-ips-v6.txt && for ip in \\\$(cat /tmp/cloudflare-ips-v4.txt); do ufw allow from \\\$ip to any port 80,443,7844 proto tcp; done && for ip in \\\$(cat /tmp/cloudflare-ips-v6.txt); do ufw allow from \\\$ip to any port 80,443,7844 proto tcp; done || echo 'Failed to update Cloudflare IPs' >> /var/log/cloudflare-update.log") | crontab -
+    (crontab -l ; echo "0 11 * * TUE /usr/bin/curl -sf https://www.cloudflare.com/ips-v4 -o /tmp/cloudflare-ips-v4.txt && /usr/bin/curl -sf https://www.cloudflare.com/ips-v6 -o /tmp/cloudflare-ips-v6.txt && for ip in \\\$(cat /tmp/cloudflare-ips-v4.txt); do ufw allow from \\\$ip to any port 80,443,7844 proto tcp; done && for ip in \\\$(cat /tmp/cloudflare-ips-v6.txt); do ufw allow from \\\$ip to any port 80,443,7844 proto tcp; done || echo 'Failed to update Cloudflare IPs' >> $LOGS_PATH/cloudflare-update.log") | crontab -
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Log rotation for Cloudflare update log ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
-    echo "/var/log/cloudflare-update.log {
+    echo "$LOGS_PATH/cloudflare-update.log {
         rotate 7
         daily
         compress
@@ -724,7 +709,7 @@ action = %(action_)s
 [sshd]
 enabled = true
 port = ssh
-logpath = /var/log/auth.log
+logpath = $LOGS_PATH/auth.log
 EOF
 
     # Enable and start Fail2ban
@@ -732,7 +717,7 @@ EOF
     sudo systemctl start fail2ban
 
     # Enable log rotation for Fail2ban logs
-    echo "/var/log/fail2ban.log {
+    echo "$LOGS_PATH/fail2ban.log {
     rotate 7
     daily
     compress
@@ -782,9 +767,21 @@ EOF
     sudo timedatectl set-ntp true || true
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Unattended Upgrades for Automatic Security Updates ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
+    # Set the frontend to non-interactive to avoid prompts
+    export DEBIAN_FRONTEND=noninteractive
+
     echo "Installing and enabling unattended-upgrades for automatic security updates..."
+
+    # Install unattended-upgrades in non-interactive mode
     sudo apt-get install -y unattended-upgrades || true
-    sudo dpkg-reconfigure --priority=low unattended-upgrades || true
+
+    # Pre-seed the configuration to ensure it runs without prompts
+    sudo debconf-set-selections <<< "unattended-upgrades unattended-upgrades/enable_auto_updates boolean true"
+
+    # Reconfigure unattended-upgrades with the pre-seeded configuration
+    sudo dpkg-reconfigure -f noninteractive unattended-upgrades || true
+
+    # Enable automatic reboot after unattended upgrades, and append to the configuration
     echo "Unattended-Upgrade::Automatic-Reboot \"true\";" | sudo tee -a /etc/apt/apt.conf.d/50unattended-upgrades || true
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Enabling TCP SYN Cookies for DDoS Protection ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
