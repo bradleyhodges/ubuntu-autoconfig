@@ -359,7 +359,6 @@ EOL
 
     # Initialise Composer in the Composer directory
     composer init \
-        --name="bradleyhodges/api-manager" \
         --require="bradleyhodges/api-manager:dev-main" \
         --stability="dev" \
         --working-dir="$COMPOSER_PATH" \
@@ -369,7 +368,7 @@ EOL
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Install a cron to maintain SES PHP API Manager  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
     # Create the update script
-    cat <<EOF > "$UTILITIES_PATH/update-api-manager.sh"
+    cat <<EOF > "$DOCUMENT_ROOT_PATH/update-api-manager.sh"
 #!/bin/bash
 
 # Set COMPOSER_ALLOW_SUPERUSER to suppress warnings when running as root
@@ -388,10 +387,10 @@ fi
 EOF
 
     # Make the update script executable
-    chmod +x "$UTILITIES_PATH/update-api-manager.sh"
+    chmod +x "$DOCUMENT_ROOT_PATH/update-api-manager.sh"
 
     # Set up a cron job to run the update script daily
-    CRON_JOB="@daily bash $UTILITIES_PATH/update-api-manager.sh > /dev/null 2>&1"
+    CRON_JOB="@daily bash $DOCUMENT_ROOT_PATH/update-api-manager.sh > /dev/null 2>&1"
 
     # Check if the cron job is already set, if not, add it
     (crontab -l | grep -F "$CRON_JOB") || (crontab -l ; echo "$CRON_JOB") | crontab -
