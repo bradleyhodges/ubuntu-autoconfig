@@ -573,6 +573,9 @@ EOF
 
     # Restart FrankenPHP service (Caddy) to apply the new user and group
     sudo systemctl restart frankenphp
+    
+    # Run the Caddy formatter to validate the Caddyfile and supress warnings
+    cd /etc/caddy && frankenphp fmt --overwrite || true
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Install Cloudflare Argo Tunnel  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
     if ! command -v cloudflared &> /dev/null; then
