@@ -19,6 +19,11 @@ set -x
 # or, if you're feeling fancy, all at once:
 #   > chmod +x ./setup-server.sh && sudo ./setup-server.sh
 
+# if you're having issues with `sudo: unable to execute ./setup-server.sh: No such file or directory`, 
+# it may be a line endings issue. Fix with dos2unit:
+#   > sudo apt-get install dos2unix -y
+#   > dos2unix ./setup-server.sh
+
 # *********************************************************** #
 # *     Configuration parameters - please set these now     * #
 # *********************************************************** #
@@ -36,8 +41,8 @@ LOGS_PATH="/var/log/caddy" # This is where all of the logs produced by the serve
 PUBLIC_ROOT_PATH="$DOCUMENT_ROOT_PATH/public" # This is where your public files will live
 UTILITIES_PATH="$DOCUMENT_ROOT_PATH/utilities" # This is where your utilities will live
 COMPOSER_PATH="$DOCUMENT_ROOT_PATH/composer" # This is where Composer will be installed
-COMPOSER_AUTOLOAD_PATH="$COMPOSER_PATH/vendor/autoload.php" # This is where Composer autoload will be generated
 ALLOW_PHP_REQUIRE_OUTSIDE_OF_DOCUMENT_ROOT="false" # Set to "true" to allow PHP require/require_once outside of the document root, "false" to disallow
+
 # *********************************************************** #
 
 # ` > start droplet configuration script
@@ -194,21 +199,23 @@ EOF
         sed -i 's/^max_input_time\s*=.*/max_input_time = 30/' "$PHP_INI" || true
         sed -i 's/^post_max_size\s*=.*/post_max_size = 1M/' "$PHP_INI" || true
 
-        # Enable OPCache (for PHP performance)
-        sed -i 's/^;opcache.enable\s*=.*/opcache.enable = 1/' "$PHP_INI" || true
-        sed -i 's/^;opcache.memory_consumption\s*=.*/opcache.memory_consumption = 128/' "$PHP_INI" || true
-        sed -i 's/^;opcache.max_accelerated_files\s*=.*/opcache.max_accelerated_files = 10000/' "$PHP_INI" || true
-        sed -i 's/^;opcache.revalidate_freq\s*=.*/opcache.revalidate_freq = 60/' "$PHP_INI" || true
-        sed -i 's/^;opcache.validate_timestamps\s*=.*/opcache.validate_timestamps = 1/' "$PHP_INI" || true
-
         # Disable dangerous PHP functions
-        sed -i 's/^disable_functions\s*=.*/disable_functions = exec,passthru,shell_exec,system,popen,curl_exec,curl_multi_exec,parse_ini_file,show_source/' "$PHP_INI" || true
+        sed -i 's/^disable_functions\s*=.*/disable_functions = exec,passthru,shell_exec,system,popen,curl_multi_exec,parse_ini_file,show_source/' "$PHP_INI" || true
 
         # Additional security measures
         echo "session.cookie_samesite = Strict" >> "$PHP_INI" || true  # Prevent CSRF attacks
         echo "cgi.fix_pathinfo = 0" >> "$PHP_INI" || true  # Prevent path disclosure vulnerabilities
 
         echo "Security and performance settings applied successfully."
+
+        echo "Enabling curl extension in: $PHP_INI"
+        # Check if the curl extension is already enabled
+        if ! grep -q "^extension=curl" "$PHP_INI"; then
+            # Enable the curl extension
+            echo "extension=curl" | sudo tee -a "$PHP_INI" > /dev/null
+        else
+            echo "Curl extension is already enabled."
+        fi
     fi
 
     # Update PHP to log errors to Caddy's error log
@@ -294,128 +301,101 @@ EOF
         echo "Composer is already installed, skipping."
     fi
 
-    # Update the PHP include_path to include the utilities directory
-    sed -i "s|;include_path = \".:/usr/share/php\"|include_path = \".:/usr/share/php:$UTILITIES_PATH\"|" /etc/php/*/fpm/php.ini || true
-    sed -i "s|;include_path = \".:/usr/share/php\"|include_path = \".:/usr/share/php:$UTILITIES_PATH\"|" /etc/php/*/cli/php.ini || true
+    # Configure global composer settings
+    COMPOSER_CONFIG_DIR="$HOME/.composer"
+    mkdir -p "$COMPOSER_CONFIG_DIR"
 
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~ Install SES PHP API Utilities  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
-    # Set up the Composer configuration for the utilities
-    COMPOSER_JSON_PATH="$UTILITIES_PATH/composer.json"
-    CUSTOM_VENDOR_DIR="$COMPOSER_PATH/vendor"
+    cat > "$COMPOSER_CONFIG_DIR/config.json" <<EOL
+{
+    "config": {
+        "vendor-dir": "$COMPOSER_PATH/vendor"
+    }
+}
+EOL
 
-    # Configure the deployignore file path
-    DEPLOYIGNORE_FILE="$UTILITIES_PATH/.deployignore"
+    echo "Global Composer configuration set to install packages to $COMPOSER_PATH/vendor."
 
-    # Ensure Git trusts the utilities directory
-    git config --global --add safe.directory "$UTILITIES_PATH"
+    # Set the COMPOSER_VENDOR_DIR environment variable
+    echo "Setting COMPOSER_VENDOR_DIR environment variable..."
+    export COMPOSER_VENDOR_DIR="$COMPOSER_PATH/vendor"
 
+    # Add this to the shell profile to persist the environment variable
+    if ! grep -q "export COMPOSER_VENDOR_DIR=" ~/.bashrc; then
+        echo 'export COMPOSER_VENDOR_DIR="/var/www/composer/vendor"' >> ~/.bashrc
+    fi
+
+    # Replace composer require with custom flags but leave other composer commands unaffected
+    composer() {
+        if [ "$1" == "require" ]; then
+            command composer require --working-dir="$COMPOSER_PATH" --optimize-autoloader "${@:2}"
+        else
+            command composer "$@"
+        fi
+    }
+
+    # Add the function to the shell profile to persist the behavior
+    if ! grep -q "function composer()" ~/.bashrc; then
+        echo 'function composer() {
+            if [ "$1" == "require" ]; then
+                command composer require --working-dir="$COMPOSER_PATH" --optimize-autoloader "${@:2}"
+            else
+                command composer "$@"
+            fi
+        }' >> ~/.bashrc
+    fi
+
+    # Update the PHP include_path to include the Composer directory
+    sed -i "s|;include_path = \".:/usr/share/php\"|include_path = \".:/usr/share/php:$COMPOSER_PATH\"|" /etc/php/*/fpm/php.ini || true
+    sed -i "s|;include_path = \".:/usr/share/php\"|include_path = \".:/usr/share/php:$COMPOSER_PATH\"|" /etc/php/*/cli/php.ini || true
+
+    echo "Composer setup completed with global configuration and environment variable."
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~ Install SES PHP API Manager  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
     # Set COMPOSER_ALLOW_SUPERUSER to suppress warnings when running as root
     export COMPOSER_ALLOW_SUPERUSER=1
 
-    # Make Composer use the custom vendor directory
-    export COMPOSER_VENDOR_DIR="$CUSTOM_VENDOR_DIR"
+    # cd to the composer directory
+    cd "$COMPOSER_PATH"
 
-    # Make Composer ALWAYS use the custom home (even after this script is done running)
-    echo 'export COMPOSER_VENDOR_DIR="$CUSTOM_VENDOR_DIR"' >> ~/.profile
+    # Initialise Composer in the Composer directory
+    composer init \
+        --name="bradleyhodges/api-manager" \
+        --require="bradleyhodges/api-manager:dev-main" \
+        --stability="dev" \
+        --working-dir="$COMPOSER_PATH" \
+        --no-interaction
+        
+    echo "Composer dependencies installed successfully."
 
-    # Clone the SES PHP API Utilities repository if not already cloned
-    if [ ! -d "$UTILITIES_PATH/.git" ]; then
-        echo "Cloning SES PHP API Utilities from GitHub..."
-        git clone --no-checkout https://github.com/dfes-ses/common-api-utilities.git "$UTILITIES_PATH" || { echo "Failed to clone SES API Utilities"; exit 1; }
-    else
-        echo "SES PHP API Utilities repository already cloned, pulling the latest changes..."
-        cd "$UTILITIES_PATH" && git fetch --all || { echo "Failed to fetch updates from GitHub"; exit 1; }
-    fi
-
-    # cd to the utilities directory
-    cd "$UTILITIES_PATH"
-
-    # Configure sparse-checkout
-    git config core.sparseCheckout true
-
-    # Generate sparse-checkout file based on .deployignore
-    echo "/*" > .git/info/sparse-checkout
-
-    # Read the .deployignore file and append the exclude patterns
-    if [ -f ".deployignore" ]; then
-        while IFS= read -r pattern; do
-            # Remove leading/trailing whitespace
-            pattern=$(echo "$pattern" | xargs)
-            # Skip empty lines and comments
-            if [ -n "$pattern" ] && [ "${pattern:0:1}" != "#" ]; then
-                echo "!$pattern" >> .git/info/sparse-checkout
-            fi
-        done < .deployignore
-    fi
-
-    # Check out the necessary files
-    git checkout
-
-    # Create composer.json if it doesn't exist
-    if [ ! -f "$COMPOSER_JSON_PATH" ]; then
-        echo "Creating composer.json with custom vendor directory..."
-        cat <<EOF > "$COMPOSER_JSON_PATH"
-{
-    "config": {
-        "vendor-dir": "$CUSTOM_VENDOR_DIR"
-    },
-    "require": {
-        // Add any required packages if necessary
-    }
-}
-EOF
-    else
-        echo "composer.json already exists. Ensuring custom vendor directory is set..."
-        if ! grep -q '"vendor-dir":' "$COMPOSER_JSON_PATH"; then
-            # Insert the vendor-dir configuration into the existing composer.json file
-            sed -i '/"config": {/a \ \ \ \ "vendor-dir": "'"$CUSTOM_VENDOR_DIR"'",' "$COMPOSER_JSON_PATH"
-        fi
-    fi
-
-    # Install dependencies in non-interactive mode
-    if composer install --ignore-platform-reqs --no-dev -a --optimize-autoloader --no-interaction; then
-        echo "Composer dependencies installed successfully."
-    else
-        echo "Failed to install Composer dependencies."
-        exit 1
-    fi
-
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~ Install a cron to maintain SES PHP API Utilities  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~ Install a cron to maintain SES PHP API Manager  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
     # Create the update script
-    cat <<EOF > "$UTILITIES_PATH/update-repo.sh"
+    cat <<EOF > "$UTILITIES_PATH/update-api-manager.sh"
 #!/bin/bash
 
-# Ensure Git trusts the utilities directory
-git config --global --add safe.directory "$UTILITIES_PATH"
+# Set COMPOSER_ALLOW_SUPERUSER to suppress warnings when running as root
+export COMPOSER_ALLOW_SUPERUSER=1
 
-# Change to the utilities directory
-cd "$UTILITIES_PATH" || exit 1
+# cd to the composer directory
+cd "$COMPOSER_PATH" || exit 1
 
-# Pull the latest changes
-git fetch --all || exit 1
-git reset --hard origin/main || exit 1
-git clean -fd || exit 1
-
-# Read .deployignore and remove ignored files
-if [ -f "$DEPLOYIGNORE_FILE" ]; then
-    while IFS= read -r pattern; do
-        if [ -n "\$pattern" ] && [ "\$pattern" != "#" ]; then
-            # Remove ignored files
-            find . -type f -name "\$pattern" -delete
-        fi
-    done < "$DEPLOYIGNORE_FILE"
+# Update the API Manager to the latest version
+if composer update bradleyhodges/api-manager --ignore-platform-reqs --optimize-autoloader --no-interaction; then
+    echo "\$(date): API Manager updated successfully."
+else
+    echo "\$(date): Failed to update API Manager."
+    exit 1
 fi
 EOF
 
     # Make the update script executable
-    chmod +x "$UTILITIES_PATH/update-repo.sh"
+    chmod +x "$UTILITIES_PATH/update-api-manager.sh"
 
-    # Set up a cron job to pull changes periodically
-    CRON_JOB="@hourly bash $UTILITIES_PATH/update-repo.sh > /dev/null 2>&1"
+    # Set up a cron job to run the update script daily
+    CRON_JOB="@daily bash $UTILITIES_PATH/update-api-manager.sh > /dev/null 2>&1"
 
-    # Check if the cron job is already set
+    # Check if the cron job is already set, if not, add it
     (crontab -l | grep -F "$CRON_JOB") || (crontab -l ; echo "$CRON_JOB") | crontab -
-    echo "Configured SES PHP API Utilities periodically refresh scripts"
+    echo "Configured SES PHP API Manager to automatically check for updates daily."
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Configure PHP for Caddy  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
     # Function to update php.ini file
@@ -441,11 +421,6 @@ EOF
 
         # Apply additional optimizations
         sed -i 's/;cgi.fix_pathinfo=1/cgi.fix_pathinfo=0/' "$php_ini_file"
-        sed -i 's/^;opcache.enable=1/opcache.enable=1/' "$php_ini_file"
-        sed -i 's/^;opcache.memory_consumption=128/opcache.memory_consumption=256/' "$php_ini_file"
-        sed -i 's/^;opcache.interned_strings_buffer=8/opcache.interned_strings_buffer=16/' "$php_ini_file"
-        sed -i 's/^;opcache.max_accelerated_files=10000/opcache.max_accelerated_files=20000/' "$php_ini_file"
-        sed -i 's/^;opcache.revalidate_freq=2/opcache.revalidate_freq=60/' "$php_ini_file"
     }
 
     # Find and update all relevant php.ini files
@@ -493,55 +468,62 @@ EOF
     sudo mkdir -p /etc/caddy
     cat <<EOF > /etc/caddy/Caddyfile
 {
-    email $SERVER_EMAIL  # Set your email for Let's Encrypt notifications
-    auto_https off  # Disable automatic HTTP-01 challenges
-    frankenphp
+    # Global options
+    email $SERVER_EMAIL          # Set your email for Let's Encrypt notifications
+    auto_https off               # Disable automatic HTTP-01 challenges, as you are using custom TLS certificates
+    frankenphp                   # Enable FrankenPHP module for PHP handling
+
     servers {
-        protocols h1 h2 h3  # Enable HTTP/1, HTTP/2, and HTTP/3 (QUIC)
+        protocols h1 h2 h3        # Enable HTTP/1, HTTP/2, and HTTP/3 (QUIC) protocols
     }
-    # Error logs configuration
+
+    # Configure logging at the global level
     log {
-        level ERROR
-        output file $LOGS_PATH/error.log
+        level ERROR               # Set log level to ERROR to capture only error logs
+        output file $LOGS_PATH/error.log  # Log errors to a specified file
     }
 }
 
-:443 {
+# Site-specific configuration
+$SERVER_FQDN {
+    # Serve files from the public directory
     root * $PUBLIC_ROOT_PATH
-    php_server {  # This will enable the FrankenPHP integration
-        # Add your PHP handling configuration here
-    }
 
-    # Enable gzip and Brotli compression
-	encode zstd br gzip
+    # Enable PHP support using FrankenPHP
+    php_server
 
-    # Enable security headers
+    # Compression settings
+    encode zstd br gzip            # Enable Zstandard, Brotli, and gzip compression
+
+    # Security headers for improved security
     header {
-        Cache-Control max-age=86400, public
-        Strict-Transport-Security max-age=31536000;
-        X-Content-Type-Options nosniff
-        X-Frame-Options DENY
-        X-XSS-Protection "1; mode=block"
-        Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self';"
-        Referrer-Policy "no-referrer"
-        Feature-Policy "geolocation 'none'; microphone 'none'; camera 'none'"
+        Strict-Transport-Security max-age=31536000; includeSubDomains; preload;  # Enforce HTTPS for 1 year
+        X-Content-Type-Options nosniff                                           # Prevent MIME type sniffing
+        X-Frame-Options DENY                                                     # Disallow embedding of this site in an iframe
+        X-XSS-Protection "1; mode=block"                                         # Enable XSS protection in browsers
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self';"  # Define content policies
+        Referrer-Policy "no-referrer"                                            # Prevent sending the referrer header
+        Permissions-Policy "geolocation=(), microphone=(), camera=(), fullscreen=(), payment=()" # Restrict usage of browser features
     }
 
-    tls $SSL_CERT_PATH $SSL_KEY_PATH  # Add TLS with the self-signed certificate
+    # TLS configuration with the provided certificate and key
+    tls $SSL_CERT_PATH $SSL_KEY_PATH   # Use the specified TLS certificate and key
 
-    try_files {path} {path}/ /index.php?{query}
+    # Allow serving PHP files without the .php extension
+    try_files {path} {path}/ {path}.php /index.php?{query}
 
+    # Access log configuration
+    log {
+        output file $LOGS_PATH/access.log  # Log access requests to a specific file
+        format console                     # Log format set to 'console'; can be changed to 'json' if preferred
+    }
+
+    # PHP file handling
     @phpFiles {
-        path *.php
+        path *.php                      # Match all PHP files
     }
     handle @phpFiles {
-        try_files {path} =404
-    }
-
-    # Add logging for access and errors
-    log {
-        output file $LOGS_PATH/access.log
-        format console  # You can use 'format console' or 'format json' depending on your preference
+        try_files {path} =404            # Attempt to serve the PHP file, return 404 if not found
     }
 }
 EOF
@@ -788,11 +770,6 @@ EOF
     echo "Enabling TCP SYN Cookies for protection against SYN flood attacks..."
     echo "net.ipv4.tcp_syncookies = 1" >> /etc/sysctl.conf || true
     sysctl -p || true
-
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~ Restricting Access to /proc and /sys Filesystems ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
-    echo "Restricting access to /proc and /sys filesystems..."
-    echo "mount -o remount,hidepid=2 /proc" >> /etc/rc.local || true
-    echo "mount -o remount,nodev,noexec,nosuid /sys" >> /etc/rc.local || true
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Additional security and performance configuration ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
     # Disable core dumps to avoid exposing sensitive data
