@@ -41,6 +41,7 @@ LOGS_PATH="/var/log/caddy" # This is where all of the logs produced by the serve
 PUBLIC_ROOT_PATH="$DOCUMENT_ROOT_PATH/public" # This is where your public files will live
 UTILITIES_PATH="$DOCUMENT_ROOT_PATH/utilities" # This is where your utilities will live
 COMPOSER_PATH="$DOCUMENT_ROOT_PATH/composer" # This is where Composer will be installed
+UPLOADS_PATH="$DOCUMENT_ROOT_PATH/uploads" # This is where PHP will be instructed to temporarily store uploaded files
 ALLOW_PHP_REQUIRE_OUTSIDE_OF_DOCUMENT_ROOT="false" # Set to "true" to allow PHP require/require_once outside of the document root, "false" to disallow
 
 # *********************************************************** #
@@ -165,13 +166,9 @@ EOF
     php_version=$(php -v | head -n 1)
     echo "PHP successfully installed. Version: $php_version"
 
-    # Find the PHP configuration file (php.ini)
-    PHP_INI=$(php --ini | grep "Loaded Configuration File" | awk '{print $4}')
-
-    if [ -z "$PHP_INI" ]; then
-        echo "php.ini file not found."
-    else
-        echo "PHP configuration file found at: $PHP_INI"
+    # Find and update all in-scope php.ini files
+    find /etc/php -type f -name "php.ini" | while read -r PHP_INI; do
+        echo "Updating $PHP_INI..."
 
         # Backup the existing php.ini
         cp "$PHP_INI" "$PHP_INI.bak_$(date +%F_%T)" || true
@@ -186,37 +183,56 @@ EOF
         sed -i 's/^upload_max_filesize\s*=.*/upload_max_filesize = 1M/' "$PHP_INI" || true
         sed -i 's|^session.save_path\s*=.*|session.save_path = "'$DOCUMENT_ROOT_PATH'/session"|' "$PHP_INI" || true
         sed -i 's|^upload_tmp_dir\s*=.*|upload_tmp_dir = "'$DOCUMENT_ROOT_PATH'/session"|' "$PHP_INI" || true
+        sed -i 's/^allow_url_fopen\s*=.*/allow_url_fopen = Off/' "$PHP_INI" || true
+        sed -i 's/^allow_url_include\s*=.*/allow_url_include = Off/' "$PHP_INI" || true
 
+        # Enable error logging
+        sed -i 's/^log_errors\s*=.*/log_errors = On/' "$PHP_INI" || true
+        sed -i 's/^html_errors\s*=.*/html_errors = Off/' "$PHP_INI" || true  # Disable HTML errors
+        sed -i 's/^display_errors\s*=.*/display_errors = Off/' "$PHP_INI" || true  # Disable displaying errors to the user
+        sed -i 's/^error_reporting\s*=.*/error_reporting = E_ALL/' "$PHP_INI" || true  # Report all errors
+        
         # Harden session security
         sed -i 's/^session.cookie_httponly\s*=.*/session.cookie_httponly = 1/' "$PHP_INI" || true
         sed -i 's/^session.cookie_secure\s*=.*/session.cookie_secure = 1/' "$PHP_INI" || true
         sed -i 's/^session.use_strict_mode\s*=.*/session.use_strict_mode = 1/' "$PHP_INI" || true
         sed -i 's/^session.use_only_cookies\s*=.*/session.use_only_cookies = 1/' "$PHP_INI" || true
-
+        sed -i 's/^session.sid_bits_per_character\s*=.*/session.sid_bits_per_character = 6/' "$PHP_INI" || true  # Increase session ID entropy
+        sed -i 's/^session.sid_length\s*=.*/session.sid_length = 48/' "$PHP_INI" || true  # Increase session ID length
+        sed -i 's/^session.hash_function\s*=.*/session.hash_function = sha512/' "$PHP_INI" || true  # Use SHA-512 for session hashing
+        sed -i 's/^session.hash_bits_per_character\s*=.*/session.hash_bits_per_character = 6/' "$PHP_INI" || true  # Increase session hash entropy
+        sed -i 's/^session.cookie_samesite\s*=.*/session.cookie_samesite = Strict/' "$PHP_INI" || true  # Prevent CSRF attacks
+        
         # Additional performance tuning
         sed -i 's/^memory_limit\s*=.*/memory_limit = 256M/' "$PHP_INI" || true
         sed -i 's/^max_execution_time\s*=.*/max_execution_time = 30/' "$PHP_INI" || true
         sed -i 's/^max_input_time\s*=.*/max_input_time = 30/' "$PHP_INI" || true
         sed -i 's/^post_max_size\s*=.*/post_max_size = 1M/' "$PHP_INI" || true
 
+        # Set the upload_tmp_dir to a secure location
+        sed -i 's|^upload_tmp_dir\s*=.*|upload_tmp_dir = "'$DOCUMENT_ROOT_PATH'"|' "$PHP_INI" || true
+        chmod 700 "$UPLOADS_PATH" || true # Ensure the directory is only accessible by the web server
+        
         # Disable dangerous PHP functions
-        sed -i 's/^disable_functions\s*=.*/disable_functions = exec,passthru,shell_exec,system,popen,curl_multi_exec,parse_ini_file,show_source/' "$PHP_INI" || true
+        sed -i 's/^disable_functions\s*=.*/disable_functions = exec,passthru,shell_exec,system,popen,proc_open,proc_close,proc_get_status,proc_terminate,pcntl_exec,show_source,parse_ini_file,phpinfo,symlink,dl/' "$PHP_INI" || true
 
         # Additional security measures
-        echo "session.cookie_samesite = Strict" >> "$PHP_INI" || true  # Prevent CSRF attacks
-        echo "cgi.fix_pathinfo = 0" >> "$PHP_INI" || true  # Prevent path disclosure vulnerabilities
+        echo "cgi.fix_pathinfo = 0" >> "$PHP_INI" || true # Prevent path disclosure vulnerabilities
 
         echo "Security and performance settings applied successfully."
 
-        echo "Enabling curl extension in: $PHP_INI"
-        # Check if the curl extension is already enabled
-        if ! grep -q "^extension=curl" "$PHP_INI"; then
-            # Enable the curl extension
-            echo "extension=curl" | sudo tee -a "$PHP_INI" > /dev/null
-        else
-            echo "Curl extension is already enabled."
-        fi
-    fi
+        # Enable required PHP extensions
+        for ext in curl ffi mbstring exif openssl mysqli; do
+            if ! grep -q "^extension=$ext" "$PHP_INI"; then
+                echo "Enabling $ext extension in: $PHP_INI"
+                echo "extension=$ext" | sudo tee -a "$PHP_INI" > /dev/null
+            else
+                echo "$ext extension is already enabled in: $PHP_INI"
+            fi
+        done
+
+        echo "Extensions have been enabled in: $PHP_INI"
+    done
 
     # Update PHP to log errors to Caddy's error log
     sed -i "s|;*log_errors =.*|log_errors = On|" /etc/php/*/fpm/php.ini || true
@@ -364,6 +380,9 @@ EOL
         --working-dir="$COMPOSER_PATH" \
         --no-interaction
         
+    # Install the dependencies
+    composer install --ignore-platform-reqs --optimize-autoloader --no-interaction
+
     echo "Composer dependencies installed successfully."
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Install a cron to maintain SES PHP API Manager  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
