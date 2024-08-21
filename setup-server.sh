@@ -344,7 +344,7 @@ EOL
 
     # Add this to the shell profile to persist the environment variable
     if ! grep -q "export COMPOSER_VENDOR_DIR=" ~/.bashrc; then
-        echo 'export COMPOSER_VENDOR_DIR="/var/www/composer/vendor"' >> ~/.bashrc
+        echo 'export COMPOSER_VENDOR_DIR="'$COMPOSER_VENDOR_DIR'"' >> ~/.bashrc
     fi
 
     # Replace composer require with custom flags but leave other composer commands unaffected
@@ -360,7 +360,7 @@ EOL
     if ! grep -q "function composer()" ~/.bashrc; then
         echo 'function composer() {
             if [ "$1" == "require" ]; then
-                command composer require --working-dir="$COMPOSER_PATH" --optimize-autoloader "${@:2}"
+                command composer require --working-dir="'$COMPOSER_PATH'" --optimize-autoloader "${@:2}"
             else
                 command composer "$@"
             fi
