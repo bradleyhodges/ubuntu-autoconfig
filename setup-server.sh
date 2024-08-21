@@ -984,7 +984,10 @@ Your server has been configured with the following:
  - Document root: $DOCUMENT_ROOT_PATH
  - Utilities located at: $UTILITIES_PATH
  - Composer packages installed in: $COMPOSER_PATH 
- 
+
+This server has been secured with a firewall. To allow additional ports, run:
+    > sudo ufw allow <port_number>
+
 Server FQDN: $SERVER_FQDN
 
 Next Steps: 
@@ -999,13 +1002,23 @@ Next Steps:
  3. Ensure your PHP files include Sentry for error reporting
  4. Access your server through your configured Cloudflare domain
 
-A dynamic utility import has also been installed. Import utilities in your 
-PHP scripts using `require_once 'app://utilities/utility.php'`
+If using Cloudflare Origin Certificates, you will need to create one, install it into the 
+Caddyfile, and set the Cloudflare tunnel origin cert path to the same location. *********
+**** This must be done AFTER the tunnel is installed and configured on Cloudflare Zero 
+Trust. Here's what to do after that: 
 
-This server has been secured with a firewall. To allow additional ports, run:
-    > sudo ufw allow <port_number>
+    Add this to your Caddyfile:
+        tls /etc/caddy/ssl/certs/cloudflare.crt /etc/caddy/ssl/private/cloudflare.key # Use the specified TLS certificate and key
+    
+    Run this command in terminal:
+    > export TUNNEL_ORIGIN_CERT=/etc/caddy/ssl/certs/cloudflare.crt
 
-Run the following command to remove this custom MOTD:
+    Finally, run this command:
+    > cloudflared tunnel login
+
+
+
+You can run the following command to remove this custom MOTD:
 
     > sed -i '/### CUSTOM SES API CONFIGURATION IS INSTALLED ###/,\$d' /etc/motd
 
