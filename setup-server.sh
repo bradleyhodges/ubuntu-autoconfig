@@ -177,47 +177,54 @@ EOF
         # Security and performance settings for php.ini
         echo "Applying security and performance settings..."
 
-        sed -i 's/^expose_php\s*=.*/expose_php = Off/' "$PHP_INI" || true
-        sed -i 's/^display_errors\s*=.*/display_errors = Off/' "$PHP_INI" || true
-        sed -i 's/^file_uploads\s*=.*/file_uploads = On/' "$PHP_INI" || true
-        sed -i 's/^upload_max_filesize\s*=.*/upload_max_filesize = 1M/' "$PHP_INI" || true
-        sed -i 's|^session.save_path\s*=.*|session.save_path = "'$DOCUMENT_ROOT_PATH'/session"|' "$PHP_INI" || true
-        sed -i 's|^upload_tmp_dir\s*=.*|upload_tmp_dir = "'$DOCUMENT_ROOT_PATH'/session"|' "$PHP_INI" || true
-        sed -i 's/^allow_url_fopen\s*=.*/allow_url_fopen = Off/' "$PHP_INI" || true
-        sed -i 's/^allow_url_include\s*=.*/allow_url_include = Off/' "$PHP_INI" || true
+        # Disable PHP version exposure in HTTP headers
+        sed -i 's/^\(;*\)\(expose_php\s*=\s*\).*/\2Off/' "$PHP_INI" || true
 
-        # Enable error logging
-        sed -i 's/^log_errors\s*=.*/log_errors = On/' "$PHP_INI" || true
-        sed -i 's/^html_errors\s*=.*/html_errors = Off/' "$PHP_INI" || true  # Disable HTML errors
-        sed -i 's/^display_errors\s*=.*/display_errors = Off/' "$PHP_INI" || true  # Disable displaying errors to the user
-        sed -i 's/^error_reporting\s*=.*/error_reporting = E_ALL/' "$PHP_INI" || true  # Report all errors
-        
-        # Harden session security
-        sed -i 's/^session.cookie_httponly\s*=.*/session.cookie_httponly = 1/' "$PHP_INI" || true
-        sed -i 's/^session.cookie_secure\s*=.*/session.cookie_secure = 1/' "$PHP_INI" || true
-        sed -i 's/^session.use_strict_mode\s*=.*/session.use_strict_mode = 1/' "$PHP_INI" || true
-        sed -i 's/^session.use_only_cookies\s*=.*/session.use_only_cookies = 1/' "$PHP_INI" || true
-        sed -i 's/^session.sid_bits_per_character\s*=.*/session.sid_bits_per_character = 6/' "$PHP_INI" || true  # Increase session ID entropy
-        sed -i 's/^session.sid_length\s*=.*/session.sid_length = 48/' "$PHP_INI" || true  # Increase session ID length
-        sed -i 's/^session.hash_function\s*=.*/session.hash_function = sha512/' "$PHP_INI" || true  # Use SHA-512 for session hashing
-        sed -i 's/^session.hash_bits_per_character\s*=.*/session.hash_bits_per_character = 6/' "$PHP_INI" || true  # Increase session hash entropy
-        sed -i 's/^session.cookie_samesite\s*=.*/session.cookie_samesite = Strict/' "$PHP_INI" || true  # Prevent CSRF attacks
-        
+        # Disable error display to users, enabling logging instead
+        sed -i 's/^\(;*\)\(display_errors\s*=\s*\).*/\2Off/' "$PHP_INI" || true
+
+        # Configure secure session handling and file upload temp directories
+        sed -i 's|^\(;*\)\(session.save_path\s*=\s*\).*|\2'$DOCUMENT_ROOT_PATH'/session|' "$PHP_INI" || true
+        sed -i 's|^\(;*\)\(upload_tmp_dir\s*=\s*\).*|\2'$DOCUMENT_ROOT_PATH'/session|' "$PHP_INI" || true
+
+        # Disable potentially unsafe remote URL file handling
+        sed -i 's/^\(;*\)\(allow_url_fopen\s*=\s*\).*/\2Off/' "$PHP_INI" || true
+        sed -i 's/^\(;*\)\(allow_url_include\s*=\s*\).*/\2Off/' "$PHP_INI" || true
+
+        # Enable error logging and disable HTML errors in logs
+        sed -i 's/^\(;*\)\(log_errors\s*=\s*\).*/\2On/' "$PHP_INI" || true
+        sed -i 's/^\(;*\)\(html_errors\s*=\s*\).*/\2Off/' "$PHP_INI" || true
+        sed -i 's/^\(;*\)\(error_reporting\s*=\s*\).*/\2E_ALL/' "$PHP_INI" || true
+
+        # Harden session security by configuring cookies and increasing entropy
+        sed -i 's/^\(;*\)\(session.cookie_httponly\s*=\s*\).*/\21/' "$PHP_INI" || true
+        sed -i 's/^\(;*\)\(session.cookie_secure\s*=\s*\).*/\21/' "$PHP_INI" || true
+        sed -i 's/^\(;*\)\(session.use_strict_mode\s*=\s*\).*/\21/' "$PHP_INI" || true
+        sed -i 's/^\(;*\)\(session.use_only_cookies\s*=\s*\).*/\21/' "$PHP_INI" || true
+        sed -i 's/^\(;*\)\(session.sid_bits_per_character\s*=\s*\).*/\26/' "$PHP_INI" || true
+        sed -i 's/^\(;*\)\(session.sid_length\s*=\s*\).*/\248/' "$PHP_INI" || true
+        sed -i 's/^\(;*\)\(session.hash_function\s*=\s*\).*/\2sha512/' "$PHP_INI" || true
+        sed -i 's/^\(;*\)\(session.hash_bits_per_character\s*=\s*\).*/\26/' "$PHP_INI" || true
+        sed -i 's/^\(;*\)\(session.cookie_samesite\s*=\s*\).*/\2Strict/' "$PHP_INI" || true
+        sed -i 's/^\(;*\)\(session.name\s*=\s*\).*/\2usr/' "$PHP_INI" || true  # Replace the PHP session name
+
         # Additional performance tuning
-        sed -i 's/^memory_limit\s*=.*/memory_limit = 256M/' "$PHP_INI" || true
-        sed -i 's/^max_execution_time\s*=.*/max_execution_time = 30/' "$PHP_INI" || true
-        sed -i 's/^max_input_time\s*=.*/max_input_time = 30/' "$PHP_INI" || true
-        sed -i 's/^post_max_size\s*=.*/post_max_size = 1M/' "$PHP_INI" || true
+        sed -i 's/^\(;*\)\(memory_limit\s*=\s*\).*/\2256M/' "$PHP_INI" || true
+        sed -i 's/^\(;*\)\(max_execution_time\s*=\s*\).*/\230/' "$PHP_INI" || true
+        sed -i 's/^\(;*\)\(max_input_time\s*=\s*\).*/\230/' "$PHP_INI" || true
+        sed -i 's/^\(;*\)\(post_max_size\s*=\s*\).*/\21M/' "$PHP_INI" || true
 
-        # Set the upload_tmp_dir to a secure location
-        sed -i 's|^upload_tmp_dir\s*=.*|upload_tmp_dir = "'$DOCUMENT_ROOT_PATH'"|' "$PHP_INI" || true
-        chmod 700 "$UPLOADS_PATH" || true # Ensure the directory is only accessible by the web server
-        
-        # Disable dangerous PHP functions
-        sed -i 's/^disable_functions\s*=.*/disable_functions = exec,passthru,shell_exec,system,popen,proc_open,proc_close,proc_get_status,proc_terminate,pcntl_exec,show_source,parse_ini_file,phpinfo,symlink,dl/' "$PHP_INI" || true
+        # Secure temporary upload directory
+        sed -i 's|^\(;*\)\(upload_tmp_dir\s*=\s*\).*|\2'$DOCUMENT_ROOT_PATH'|' "$PHP_INI" || true
+        chmod 700 "$UPLOADS_PATH" || true  # Ensure the directory is only accessible by the web server
 
-        # Additional security measures
-        echo "cgi.fix_pathinfo = 0" >> "$PHP_INI" || true # Prevent path disclosure vulnerabilities
+        # Disable potentially dangerous PHP functions
+        sed -i 's/^\(;*\)\(disable_functions\s*=\s*\).*/\2exec,passthru,shell_exec,system,popen,proc_open,proc_close,proc_get_status,proc_terminate,pcntl_exec,show_source,parse_ini_file,phpinfo,symlink,dl/' "$PHP_INI" || true
+
+        # Additional security measure to prevent path disclosure vulnerabilities
+        if ! grep -q '^cgi.fix_pathinfo' "$PHP_INI"; then
+            echo "cgi.fix_pathinfo = 0" >> "$PHP_INI" || true
+        fi
 
         echo "Security and performance settings applied successfully."
 
@@ -416,32 +423,37 @@ EOF
     echo "Configured SES PHP API Manager to automatically check for updates daily."
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~ Configure PHP for Caddy  ~~~~~~~~~~~~~~~~~~~~~~~~~~ #
-    # Function to update php.ini file
+    # Function to update php.ini file with security and performance settings
     update_php_ini() {
         local php_ini_file=$1
         local allow_uploads=$2
 
-        # Enable fileinfo extension
+        # Enable the fileinfo extension by uncommenting it if necessary
         if grep -q "^;extension=fileinfo" "$php_ini_file"; then
+            # Uncomment the extension if it's found as a comment
             sed -i "s/^;extension=fileinfo/extension=fileinfo/" "$php_ini_file"
         elif ! grep -q "^extension=fileinfo" "$php_ini_file"; then
+            # Add the extension if it's not found at all
             echo "extension=fileinfo" >> "$php_ini_file"
         fi
 
-        # Set file_uploads directive based on ALLOW_FILE_UPLOADS value
+        # Set the file_uploads directive based on the ALLOW_FILE_UPLOADS value
         if [ "$allow_uploads" = "true" ]; then
-            sed -i "s/^file_uploads = .*/file_uploads = On/" "$php_ini_file"
-            sed -i "s/^upload_max_filesize = .*/upload_max_filesize = 50M/" "$php_ini_file"
-            sed -i "s/^post_max_size = .*/post_max_size = 50M/" "$php_ini_file"
+            # Enable file uploads and set size limits
+            sed -i "s/^\(;*\)\(file_uploads\s*=\s*\).*/\2On/" "$php_ini_file"
+            sed -i "s/^\(;*\)\(upload_max_filesize\s*=\s*\).*/\250M/" "$php_ini_file"
+            sed -i "s/^\(;*\)\(post_max_size\s*=\s*\).*/\250M/" "$php_ini_file"
         else
-            sed -i "s/^file_uploads = .*/file_uploads = Off/" "$php_ini_file"
+            # Disable file uploads if ALLOW_FILE_UPLOADS is set to "false"
+            sed -i "s/^\(;*\)\(file_uploads\s*=\s*\).*/\2Off/" "$php_ini_file"
         fi
 
-        # Apply additional optimizations
-        sed -i 's/;cgi.fix_pathinfo=1/cgi.fix_pathinfo=0/' "$php_ini_file"
+        # Apply additional security optimizations
+        # Ensure cgi.fix_pathinfo is set to 0 to prevent path disclosure vulnerabilities
+        sed -i 's/^\(;*\)\(cgi.fix_pathinfo\s*=\s*\).*/\20/' "$php_ini_file"
     }
 
-    # Find and update all relevant php.ini files
+    # Find and update all relevant php.ini files across the system
     find /etc/php -type f -name "php.ini" | while read -r php_ini; do
         echo "Updating $php_ini..."
         update_php_ini "$php_ini" "$ALLOW_FILE_UPLOADS"
