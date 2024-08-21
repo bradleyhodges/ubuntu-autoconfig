@@ -385,7 +385,8 @@ EOL
         --require="bradleyhodges/api-manager:dev-main" \
         --stability="dev" \
         --working-dir="$COMPOSER_PATH" \
-        --no-interaction
+        --no-interaction \
+        --prefer-stable
         
     # Install the dependencies
     composer install --ignore-platform-reqs --optimize-autoloader --no-interaction
